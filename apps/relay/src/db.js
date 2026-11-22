@@ -65,6 +65,22 @@ CREATE TABLE IF NOT EXISTS messages (
   UNIQUE(conv_id, sender, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conv_id, row_order);
+CREATE TABLE IF NOT EXISTS blobs (
+  blob_id TEXT PRIMARY KEY,
+  conv_id TEXT NOT NULL,
+  sender TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_blobs_conv ON blobs(conv_id, created_at);
+CREATE TABLE IF NOT EXISTS profiles (
+  device_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  icon_type TEXT,
+  icon BLOB,
+  updated_at INTEGER NOT NULL
+);
 `
 
 export class RelayDb {
@@ -267,5 +283,45 @@ export class RelayDb {
       WHERE desktop_device_id = ? AND status IN ('claimed', 'confirmed') AND created_at >= ?
       ORDER BY created_at DESC LIMIT 5
     `).all(desktopDeviceId, since)
+  }
+
+  putBlob({ blobId, convId, sender, size, sha256 }) {
+    const existing = this.getBlob(blobId)
+    if (existing) {
+      if (existing.conv_id !== convId || existing.sender !== sender) {
+        throw Object.assign(new Error('blob id belongs to another conversation'), { status: 409 })
+      }
+      return { duplicate: true }
+    }
+    this.db.prepare(`
+      INSERT INTO blobs (blob_id, conv_id, sender, size, sha256, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(blobId, convId, sender, size, sha256, nowMs())
+    return { duplicate: false }
+  }
+
+  getBlob(blobId) {
+    return this.db.prepare('SELECT * FROM blobs WHERE blob_id = ?').get(blobId)
+  }
+
+  countBlobs(convId) {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM blobs WHERE conv_id = ?').get(convId)
+    return Number(row?.count || 0)
+  }
+
+  putProfile({ deviceId, name, iconType = null, icon = null }) {
+    this.db.prepare(`
+      INSERT INTO profiles (device_id, name, icon_type, icon, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(device_id) DO UPDATE SET
+        name = excluded.name,
+        icon_type = COALESCE(excluded.icon_type, profiles.icon_type),
+        icon = COALESCE(excluded.icon, profiles.icon),
+        updated_at = excluded.updated_at
+    `).run(deviceId, name, iconType, icon, nowMs())
+  }
+
+  getProfile(deviceId) {
+    return this.db.prepare('SELECT * FROM profiles WHERE device_id = ?').get(deviceId)
   }
 }

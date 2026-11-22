@@ -7,15 +7,17 @@
  */
 import jsQR from 'jsqr'
 import {
-  aesDecrypt, aesEncrypt, b64u, canonicalEnvelope, createIdentity, envelopeAad,
-  fromB64u, newMessageId, sharedKey, sign, verify,
+  aesDecrypt, aesDecryptBytes, aesEncrypt, aesEncryptBytes, b64u, canonicalEnvelope,
+  createIdentity, envelopeAad, fromB64u, newBlobId, newMessageId, sha256hex, sharedKey, sign, verify,
 } from './crypto.js'
 import {
-  getBind, normalizeRelay, parseBindPayload, signedRequest, wsUrl,
+  downloadBlob, getBind, getProfile, normalizeRelay, parseBindPayload, signedRequest, uploadBlob, wsUrl,
 } from './api.js'
 
 const STORE_KEY = 'eo.state.v1'
 const MAX_MESSAGES = 300
+const MAX_FILE_BYTES = 16 * 1024 * 1024
+const MAX_VOICE_MS = 120_000
 const HEARTBEAT_MS = 20_000
 const STALE_MS = 55_000
 const MAX_BACKOFF_MS = 30_000
@@ -38,6 +40,11 @@ let toastTimer = null
 let scanStream = null
 let scanTimer = null
 let codeResolver = null
+let recorder = null
+let recordStream = null
+let recordChunks = []
+let recordStartedAt = 0
+let recordTimer = null
 
 function secureStore() {
   return typeof window.EoSecure?.get === 'function' ? window.EoSecure : null
@@ -60,7 +67,14 @@ function saveState() {
         conv.messages = conv.messages.slice(-MAX_MESSAGES)
       }
     }
-    const raw = JSON.stringify({ v: 1, relay: state.relay, conversations: state.conversations })
+    const conversations = state.conversations.map((conv) => ({
+      ...conv,
+      messages: (conv.messages || []).map((message) => {
+        const { _objectUrl, _bytes, _loading, ...rest } = message
+        return rest
+      }),
+    }))
+    const raw = JSON.stringify({ v: 1, relay: state.relay, conversations })
     const secure = secureStore()
     if (secure) secure.put(STORE_KEY, raw)
     else localStorage.setItem(STORE_KEY, raw)
@@ -89,6 +103,64 @@ function fmtTime(ts) {
 
 function titleOf(conv) {
   return conv.title || 'EO助手'
+}
+
+function kindLabel(message) {
+  const type = message.meta?.type || message.kind
+  if (type === 'voice') return '语音'
+  if (type === 'ppt') return 'PPT'
+  if (type === 'file') return '文件'
+  return '消息'
+}
+
+function snippetOf(message) {
+  if (!message) return ''
+  if (message.kind === 'text' && !message.meta?.blobId) return message.text || ''
+  const name = message.meta?.name || ''
+  return `[${kindLabel(message)}] ${name}`.trim()
+}
+
+function avatarUrl(conv) {
+  if (!conv?.iconBase64) return ''
+  return `data:${conv.iconType || 'image/png'};base64,${conv.iconBase64}`
+}
+
+function paintAvatar(el, conv) {
+  if (!el) return
+  const url = avatarUrl(conv)
+  el.textContent = ''
+  if (url) {
+    el.style.backgroundImage = `url("${url}")`
+    el.style.backgroundSize = 'cover'
+    el.style.backgroundPosition = 'center'
+    el.classList.add('hasicon')
+  } else {
+    el.style.backgroundImage = ''
+    el.classList.remove('hasicon')
+    el.textContent = titleOf(conv).slice(0, 1).toUpperCase()
+  }
+}
+
+function applyProfile(conv, profile) {
+  if (!conv || !profile) return
+  if (profile.name) conv.title = String(profile.name).slice(0, 32)
+  conv.iconType = profile.iconType || ''
+  conv.iconBase64 = profile.iconBase64 || ''
+  conv.iconVersion = profile.updatedAt || conv.iconVersion || 0
+}
+
+async function refreshProfile(conv) {
+  if (!conv?.peerDeviceId || !conv.relay) return
+  try {
+    const profile = await getProfile(conv.relay, conv.peerDeviceId)
+    if (!profile) return
+    applyProfile(conv, profile)
+    saveState()
+    renderList()
+    if (activeId === conv.convId) renderChat()
+  } catch {
+    // A relay restart or offline peer must not break the conversation.
+  }
 }
 
 function activeConv() {
@@ -239,6 +311,16 @@ async function handleFrame(link, frame) {
       renderList()
       break
     }
+    case 'profile': {
+      const conv = state.conversations.find(item => item.convId === frame.convId && item.relay === link.relay)
+      if (!conv) break
+      if (frame.name) conv.title = String(frame.name).slice(0, 32)
+      conv.iconVersion = frame.iconVersion || Date.now()
+      refreshProfile(conv)
+      renderList()
+      if (conv.convId === activeId) renderChat()
+      break
+    }
     case 'msg':
       await handleIncoming(link, frame.envelope)
       break
@@ -348,6 +430,7 @@ async function beginBind(payload) {
   ensureLink(relay)
   render()
   openChat(conv.convId)
+  refreshProfile(conv)
   toast('已连接电脑版 EO助手')
 }
 
@@ -458,7 +541,7 @@ function renderList() {
 
     const avatar = document.createElement('div')
     avatar.className = 'avatar'
-    avatar.textContent = titleOf(conv).slice(0, 1).toUpperCase()
+    paintAvatar(avatar, conv)
     const presence = document.createElement('span')
     presence.className = `presence${conv.online ? ' on' : ''}`
     avatar.append(presence)
@@ -480,7 +563,7 @@ function renderList() {
     const snippet = document.createElement('div')
     snippet.className = 'snippet'
     const last = (conv.messages || [])[conv.messages.length - 1]
-    snippet.textContent = last ? (last.kind === 'text' ? last.text : `[${last.kind}]`) : '已连接，可以发消息'
+    snippet.textContent = last ? snippetOf(last) : '已连接，可以发消息'
     snippets.append(snippet)
     if (conv.unread > 0) {
       const badge = document.createElement('span')
@@ -494,10 +577,123 @@ function renderList() {
   }
 }
 
+function fmtSize(bytes) {
+  const n = Number(bytes || 0)
+  if (!n) return ''
+  if (n < 1024) return `${n}B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`
+  return `${(n / 1024 / 1024).toFixed(1)}MB`
+}
+
+function base64ForNative(bytes) {
+  return b64u(bytes).replace(/-/g, '+').replace(/_/g, '/')
+}
+
+async function decryptAttachment(conv, message) {
+  const meta = message.meta || {}
+  if (!meta.blobId || !meta.blobNonce || !meta.blobAad) throw new Error('附件信息不完整')
+  const ciphertext = await downloadBlob(state.identity, conv.relay, conv.convId, meta.blobId)
+  const plain = await aesDecryptBytes(fromB64u(conv.key), meta.blobNonce, b64u(ciphertext), meta.blobAad)
+  if (meta.sha256 && await sha256hex(plain) !== meta.sha256) throw new Error('附件校验失败')
+  return plain
+}
+
+async function openAttachment(conv, message, button, audio) {
+  if (message._loading) return
+  message._loading = true
+  const oldText = button.textContent
+  button.textContent = '解密中…'
+  button.disabled = true
+  try {
+    if (message._objectUrl) {
+      if (message.meta?.type === 'voice' && audio) {
+        audio.src = message._objectUrl
+        audio.hidden = false
+        button.hidden = true
+        audio.play().catch(() => toast('点击播放器开始播放'))
+      } else {
+        triggerDownload(message._objectUrl, message.meta?.name || 'attachment')
+      }
+      return
+    }
+    const plain = await decryptAttachment(conv, message)
+    const blob = new Blob([plain], { type: message.meta?.mime || 'application/octet-stream' })
+    message._objectUrl = URL.createObjectURL(blob)
+    if (message.meta?.type === 'voice' && audio) {
+      audio.src = message._objectUrl
+      audio.hidden = false
+      button.hidden = true
+      audio.play().catch(() => toast('点击播放器开始播放'))
+    } else if (window.EoNative?.saveFile) {
+      const name = message.meta?.name || 'attachment'
+      window.EoNative.saveFile(name, message.meta?.mime || 'application/octet-stream', base64ForNative(plain))
+      toast('已保存到手机 Download/EO助手')
+      button.textContent = '已保存'
+    } else {
+      triggerDownload(message._objectUrl, message.meta?.name || 'attachment')
+    }
+  } catch (error) {
+    toast(`附件打开失败：${error.message || error}`)
+  } finally {
+    message._loading = false
+    button.disabled = false
+    if (!button.hidden && button.textContent === oldText) button.textContent = oldText
+  }
+}
+
+function triggerDownload(url, name) {
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = name
+  anchor.rel = 'noopener'
+  document.body.append(anchor)
+  anchor.click()
+  anchor.remove()
+}
+
+function renderAttachmentCard(conv, message) {
+  const meta = message.meta || {}
+  const card = document.createElement('div')
+  card.className = 'attachcard'
+  const type = meta.type || message.kind
+  const icon = document.createElement('div')
+  icon.className = `attachicon${type === 'voice' ? ' voice' : ''}`
+  icon.textContent = type === 'voice' ? '声' : type === 'ppt' ? 'P' : '文'
+  const info = document.createElement('div')
+  info.className = 'attachinfo'
+  const name = document.createElement('div')
+  name.className = 'attachname'
+  name.textContent = meta.name || `${kindLabel(message)}附件`
+  const detail = document.createElement('div')
+  detail.className = 'attachdetail'
+  const duration = Number(meta.duration || 0)
+  detail.textContent = [
+    duration > 0 ? `${Math.round(duration)}"` : '',
+    fmtSize(meta.size),
+  ].filter(Boolean).join(' · ')
+  info.append(name, detail)
+
+  const button = document.createElement('button')
+  button.className = 'attachopen'
+  button.type = 'button'
+  button.textContent = type === 'voice' ? '播放' : '打开'
+  const audio = document.createElement('audio')
+  audio.controls = true
+  audio.preload = 'none'
+  audio.hidden = true
+  audio.className = 'voiceaudio'
+  button.addEventListener('click', () => openAttachment(conv, message, button, audio))
+
+  card.append(icon, info, button)
+  const wrap = document.createElement('div')
+  wrap.append(card, audio)
+  return wrap
+}
+
 function renderChat() {
   const conv = activeConv()
   if (!conv) return
-  $('chatAvatar').textContent = titleOf(conv).slice(0, 1).toUpperCase()
+  paintAvatar($('chatAvatar'), conv)
   $('chatName').textContent = titleOf(conv)
   const status = $('chatStatus')
   status.replaceChildren()
@@ -512,20 +708,32 @@ function renderChat() {
     const bubble = document.createElement('div')
     bubble.className = `bubble${message.sender === state.identity.deviceId ? ' mine' : ''}`
     const body = document.createElement('div')
-    body.textContent = message.kind === 'text' ? message.text : `[${message.kind}] 阶段 2 接入`
+    body.className = 'bubblebody'
+    const attachment = message.meta?.blobId || message.kind !== 'text'
+    if (!attachment) {
+      body.textContent = message.text
+    } else {
+      if (message.text) {
+        const caption = document.createElement('div')
+        caption.className = 'caption'
+        caption.textContent = message.text
+        body.append(caption)
+      }
+      body.append(renderAttachmentCard(conv, message))
+    }
     const meta = document.createElement('span')
     meta.className = 'meta'
     const statusText = message.sender === state.identity.deviceId
-      ? (message.status === 'sending' ? '发送中' : message.status === 'failed' ? '失败' : '已发送')
+      ? (message.status === 'uploading' ? '加密上传中'
+        : message.status === 'sending' ? '发送中'
+          : message.status === 'failed' ? '失败' : '已发送')
       : ''
     meta.textContent = [fmtTime(message.ts), statusText].filter(Boolean).join(' · ')
     bubble.append(body, meta)
     messagesEl.append(bubble)
   }
   messagesEl.scrollTop = messagesEl.scrollHeight
-}
-
-function openChat(convId) {
+}function openChat(convId) {
   activeId = convId
   const conv = activeConv()
   if (conv) {
@@ -599,7 +807,172 @@ async function sendText() {
   renderList()
 }
 
-/* ---------------------------------------------------------------- settings */
+async function sendAttachment(blob, kind = 'file', duration = 0) {
+  const conv = activeConv()
+  if (!conv) return
+  if (blob.size <= 0) { toast('文件为空'); return }
+  if (blob.size > MAX_FILE_BYTES) { toast('单个附件不能超过 16MB'); return }
+  const isVoice = kind === 'voice'
+  const name = blob.name || (isVoice ? `语音-${new Date().toISOString().slice(11, 19).replace(/:/g, '')}.webm` : 'attachment')
+  const mime = blob.type || (kind === 'ppt' ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation' : 'application/octet-stream')
+  const bytes = new Uint8Array(await blob.arrayBuffer())
+  const sha = await sha256hex(bytes)
+  const ts = Date.now()
+  const seq = Math.max(Number(conv.seq || 0), 0) + 1
+  conv.seq = seq
+  const blobId = newBlobId()
+  const blobAad = `eo|blob|v1|${conv.convId}|${blobId}|${state.identity.deviceId}|${ts}|${sha}`
+  const meta = {
+    type: kind,
+    name,
+    mime,
+    size: bytes.length,
+    sha256: sha,
+    blobId,
+    blobAad,
+    duration: duration || 0,
+  }
+  let encrypted
+  try {
+    encrypted = await aesEncryptBytes(fromB64u(conv.key), bytes, blobAad)
+  } catch (error) {
+    toast(`附件加密失败：${error.message || error}`)
+    return
+  }
+  meta.blobNonce = encrypted.nonce
+  const message = {
+    msgId: newMessageId(),
+    seq,
+    sender: state.identity.deviceId,
+    kind,
+    ts,
+    text: '',
+    meta,
+    status: 'uploading',
+  }
+  if (!Array.isArray(conv.messages)) conv.messages = []
+  conv.messages.push(message)
+  conv.lastMessageAt = ts
+  saveState()
+  renderChat()
+  renderList()
+
+  try {
+    await uploadBlob(state.identity, conv.relay, conv.convId, blobId, fromB64u(encrypted.ct))
+  } catch (error) {
+    message.status = 'failed'
+    saveState()
+    renderChat()
+    toast(`附件上传失败：${error.message || error}`)
+    return
+  }
+
+  const envelope = {
+    v: 1,
+    convId: conv.convId,
+    msgId: message.msgId,
+    seq,
+    kind,
+    sender: state.identity.deviceId,
+    ts,
+    nonce: '',
+    ct: '',
+    meta: null,
+  }
+  try {
+    const payload = await aesEncrypt(fromB64u(conv.key), JSON.stringify({ text: '', meta }), envelopeAad(envelope))
+    envelope.nonce = payload.nonce
+    envelope.ct = payload.ct
+    envelope.sig = b64u(sign(canonicalEnvelope(envelope), state.identity.edPriv))
+  } catch (error) {
+    message.status = 'failed'
+    saveState()
+    renderChat()
+    toast(`附件消息加密失败：${error.message || error}`)
+    return
+  }
+  message.status = 'sending'
+  sendFrame(conv.relay, { type: 'msg', envelope })
+  saveState()
+  renderChat()
+  renderList()
+}
+
+function sendSelectedFile(file) {
+  if (!file) return
+  const kind = /\.(pptx?)$/i.test(file.name || '') ? 'ppt' : 'file'
+  sendAttachment(file, kind)
+}
+
+function pickAudioMime() {
+  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg']
+  if (typeof MediaRecorder === 'undefined') return ''
+  for (const type of candidates) {
+    if (MediaRecorder.isTypeSupported(type)) return type
+  }
+  return ''
+}
+
+async function toggleRecording() {
+  if (recorder && recorder.state !== 'inactive') {
+    recorder.stop()
+    return
+  }
+  if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+    toast('当前环境不支持录音')
+    return
+  }
+  try {
+    recordStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+  } catch (error) {
+    toast(`无法打开麦克风：${error.message || error}`)
+    return
+  }
+  const mime = pickAudioMime()
+  recorder = new MediaRecorder(recordStream, mime ? { mimeType: mime } : undefined)
+  recordChunks = []
+  recordStartedAt = Date.now()
+  recorder.ondataavailable = (event) => {
+    if (event.data?.size) recordChunks.push(event.data)
+  }
+  recorder.onstop = async () => {
+    const durationMs = Math.min(Date.now() - recordStartedAt, MAX_VOICE_MS + 2000)
+    const blob = new Blob(recordChunks, { type: recorder.mimeType || mime || 'audio/webm' })
+    recordChunks = []
+    if (recordStream) {
+      for (const track of recordStream.getTracks()) track.stop()
+      recordStream = null
+    }
+    resetRecordButton()
+    if (blob.size > 512) sendAttachment(blob, 'voice', durationMs / 1000)
+  }
+  recorder.onerror = (event) => {
+    toast(`录音失败：${event.error?.message || event.error || '未知错误'}`)
+    resetRecordButton()
+  }
+  recorder.start()
+  const voiceBtn = $('voiceBtn')
+  voiceBtn.textContent = '停止'
+  voiceBtn.classList.add('recording')
+  recordTimer = setInterval(() => {
+    const seconds = Math.floor((Date.now() - recordStartedAt) / 1000)
+    voiceBtn.textContent = `停止 ${Math.min(seconds, 120)}s`
+    if (seconds >= MAX_VOICE_MS / 1000) recorder?.stop()
+  }, 500)
+}
+
+function resetRecordButton() {
+  if (recordTimer) clearInterval(recordTimer)
+  recordTimer = null
+  recorder = null
+  const voiceBtn = $('voiceBtn')
+  if (voiceBtn) {
+    voiceBtn.textContent = '语音'
+    voiceBtn.classList.remove('recording')
+  }
+}
+
+
 
 function openSettings() {
   renderSettings()
@@ -658,6 +1031,7 @@ async function init() {
 
   const relays = new Set([state.relay, ...state.conversations.map(conv => conv.relay)].filter(Boolean))
   for (const relay of relays) ensureLink(relay)
+  for (const conv of state.conversations) refreshProfile(conv)
 }
 
 /* --------------------------------------------------------------- listeners */
@@ -682,7 +1056,13 @@ textInput.addEventListener('keydown', (event) => {
     sendText()
   }
 })
-$('attachBtn').addEventListener('click', () => toast('文件发送在阶段 2 接入'))
+$('attachBtn').addEventListener('click', () => $('fileInput').click())
+$('fileInput').addEventListener('change', (event) => {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  sendSelectedFile(file)
+})
+$('voiceBtn').addEventListener('click', toggleRecording)
 $('codeBtn').addEventListener('click', () => {
   const value = $('codeInput').value.trim()
   if (!/^\d{6}$/.test(value)) {

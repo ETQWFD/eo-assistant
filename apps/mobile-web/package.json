@@ -1,9 +1,9 @@
 {
   "name": "eo-mobile-web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "EO Assistant mobile PWA: QR bind, E2EE text chat, presence.",
+  "description": "EO Assistant mobile PWA: QR bind, E2EE text/attachment/voice chat, presence.",
   "scripts": {
     "build": "node scripts/build.mjs"
   },

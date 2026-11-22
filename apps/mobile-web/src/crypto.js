@@ -41,8 +41,9 @@ export async function sha256(bytes) {
   return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
 }
 
-export async function sha256hex(text) {
-  const digest = await sha256(utf8(text))
+export async function sha256hex(input) {
+  const bytes = typeof input === 'string' ? utf8(input) : input
+  const digest = await sha256(bytes)
   return [...digest].map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
@@ -114,6 +115,10 @@ export async function sharedKey(xPrivB64, peerXPubB64, convId) {
 }
 
 export async function aesEncrypt(keyBytes, plaintext, aad) {
+  return aesEncryptBytes(keyBytes, utf8(plaintext), aad)
+}
+
+export async function aesEncryptBytes(keyBytes, bytes, aad) {
   const key = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['encrypt'])
   const iv = randomBytes(12)
   const ciphertext = await crypto.subtle.encrypt({
@@ -121,11 +126,16 @@ export async function aesEncrypt(keyBytes, plaintext, aad) {
     iv,
     additionalData: utf8(aad),
     tagLength: 128,
-  }, key, utf8(plaintext))
+  }, key, bytes)
   return { nonce: b64u(iv), ct: b64u(new Uint8Array(ciphertext)) }
 }
 
 export async function aesDecrypt(keyBytes, nonceB64, ctB64, aad) {
+  const plain = await aesDecryptBytes(keyBytes, nonceB64, ctB64, aad)
+  return new TextDecoder().decode(plain)
+}
+
+export async function aesDecryptBytes(keyBytes, nonceB64, ctB64, aad) {
   const key = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['decrypt'])
   const plain = await crypto.subtle.decrypt({
     name: 'AES-GCM',
@@ -133,7 +143,7 @@ export async function aesDecrypt(keyBytes, nonceB64, ctB64, aad) {
     additionalData: utf8(aad),
     tagLength: 128,
   }, key, fromB64u(ctB64))
-  return new TextDecoder().decode(plain)
+  return new Uint8Array(plain)
 }
 
 export function canonicalEnvelope(e) {
@@ -148,6 +158,10 @@ export function envelopeAad(e) {
 
 export function newMessageId() {
   return `m_${b64u(randomBytes(12))}`
+}
+
+export function newBlobId() {
+  return `bl_${b64u(randomBytes(12))}`
 }
 
 export function newConvId() {

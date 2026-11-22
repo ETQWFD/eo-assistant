@@ -1,6 +1,6 @@
 {
   "name": "eo-relay",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "EO Assistant relay: QR bind sessions, E2EE message fan-out, presence, and encrypted backlog.",

@@ -115,6 +115,14 @@ function encrypt(key, plaintext, aad) {
   return { nonce: base64url(iv), ct: base64url(Buffer.concat([body, tag])) }
 }
 
+function encryptBuffer(key, plaintext, aad) {
+  const iv = crypto.randomBytes(IV)
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv)
+  cipher.setAAD(Buffer.from(aad, 'utf8'))
+  const body = Buffer.concat([cipher.update(plaintext), cipher.final()])
+  return Buffer.concat([iv, body, cipher.getAuthTag()])
+}
+
 function decrypt(key, nonce, ct, aad) {
   const iv = Buffer.from(nonce, 'base64url')
   const payload = Buffer.from(ct, 'base64url')
@@ -223,6 +231,45 @@ test('bind, E2EE chat, presence, history, duplicate and bad auth', async () => {
     assert.equal(history.data.messages.length, 2)
     assert.equal(history.data.messages[0].msgId, phoneMessage.msgId)
     assert.equal(history.data.messages[1].msgId, reply.msgId)
+
+    const icon = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+    const profile = await api(base, desktop, 'POST', '/v1/profile', { name: '桌面小助手', iconBase64: icon })
+    assert.equal(profile.status, 200, JSON.stringify(profile.data))
+    const profileFrame = await nextFrame(phoneWs, f => f.type === 'profile' && f.name === '桌面小助手')
+    assert.equal(profileFrame.convId, convId)
+    const fetchedProfile = await fetch(`${base}/v1/profile/${desktop.deviceId}`)
+    assert.equal(fetchedProfile.status, 200)
+    const profileBody = await fetchedProfile.json()
+    assert.equal(profileBody.name, '桌面小助手')
+    assert.equal(profileBody.iconBase64, icon)
+
+    const renamed = await api(base, desktop, 'POST', '/v1/profile', { name: '只改名字' })
+    assert.equal(renamed.status, 200, JSON.stringify(renamed.data))
+    const renamedProfile = await (await fetch(`${base}/v1/profile/${desktop.deviceId}`)).json()
+    assert.equal(renamedProfile.name, '只改名字')
+    assert.equal(renamedProfile.iconType, 'image/png')
+    assert.equal(renamedProfile.iconBase64, icon)
+
+    const blobId = `bl_${crypto.randomBytes(12).toString('hex')}`
+    const blobPlain = Buffer.from('阶段 2 加密附件内容：PPT/语音/文件都走同一条 blob 通道')
+    const blobKey = sharedKey(phone, desktop.xPub, convId)
+    const blobAad = `eo|blob|v1|${convId}|${blobId}|${phone.deviceId}|123|digest`
+    const blobCipher = encryptBuffer(blobKey, blobPlain, blobAad)
+    const blobPath = `/v1/blob/${blobId}`
+    const upload = await fetch(`${base}${blobPath}?convId=${convId}`, {
+      method: 'PUT',
+      headers: restHeaders(phone, 'PUT', blobPath, blobCipher),
+      body: blobCipher,
+    })
+    assert.equal(upload.status, 200, await upload.text())
+
+    const download = await fetch(`${base}${blobPath}?convId=${convId}`, {
+      method: 'GET',
+      headers: restHeaders(desktop, 'GET', blobPath, ''),
+    })
+    assert.equal(download.status, 200)
+    const downloaded = Buffer.from(await download.arrayBuffer())
+    assert.equal(sha256hex(downloaded), sha256hex(blobCipher))
 
     const tampered = {
       ...phoneMessage,

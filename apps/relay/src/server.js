@@ -40,6 +40,7 @@ function envConfig(env = process.env) {
     dataFile: env.DATA_FILE || path.join(root, 'data', 'eo-relay.sqlite'),
     publicDir: env.PUBLIC_DIR || path.join(root, 'public'),
     maxBodyBytes: Number(env.MAX_BODY_BYTES || 1024 * 1024),
+    maxBlobBytes: Number(env.MAX_BLOB_BYTES || 17 * 1024 * 1024),
     corsOrigins: env.CORS_ORIGINS || '*',
     trustProxy: env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true',
     bindTtlMs: Number(env.BIND_TTL_MS || 120_000),
@@ -64,7 +65,7 @@ function applyCors(req, res, origins) {
   if (!allow) return
   res.setHeader('access-control-allow-origin', allow)
   res.setHeader('vary', 'Origin')
-  res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS')
+  res.setHeader('access-control-allow-methods', 'GET, POST, PUT, OPTIONS')
   res.setHeader('access-control-allow-headers', 'content-type, x-eo-device, x-eo-ts, x-eo-sig, x-eo-ed, x-eo-x')
   res.setHeader('access-control-max-age', '600')
 }
@@ -83,6 +84,24 @@ function readBody(req, limit) {
       chunks.push(chunk)
     })
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    req.on('error', reject)
+  })
+}
+
+function readBodyBuffer(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    const chunks = []
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        reject(Object.assign(new Error('request body too large'), { status: 413 }))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks)))
     req.on('error', reject)
   })
 }
@@ -172,6 +191,8 @@ export function createRelay(options = {}) {
   const config = { ...envConfig(), ...options }
   fs.mkdirSync(path.dirname(config.dataFile), { recursive: true, mode: 0o700 })
   const db = new RelayDb(config.dataFile)
+  const blobDir = path.join(path.dirname(config.dataFile), 'blobs')
+  fs.mkdirSync(blobDir, { recursive: true, mode: 0o700 })
   const sockets = new Map()
   const limiter = new RateLimiter()
   const instanceId = crypto.randomUUID()
@@ -183,6 +204,30 @@ export function createRelay(options = {}) {
 
   function isOnline(deviceId) {
     return socketsFor(deviceId).size > 0
+  }
+
+  function blobFile(blobId) {
+    return path.join(blobDir, blobId)
+  }
+
+  /** Notify both ends that a device's display name/icon changed, without
+   * shipping the icon bytes over the WebSocket. */
+  function broadcastProfile(deviceId) {
+    const profile = db.getProfile(deviceId)
+    if (!profile) return
+    for (const conv of db.conversationsFor(deviceId)) {
+      const peer = db.peerOf(conv, deviceId)
+      if (!peer) continue
+      sendToDevice(peer.deviceId, {
+        type: 'profile',
+        convId: conv.conv_id,
+        peerDeviceId: deviceId,
+        name: profile.name,
+        iconType: profile.icon_type || '',
+        iconVersion: profile.updated_at,
+        ts: nowMs(),
+      })
+    }
   }
 
   function sendToDevice(deviceId, frame) {
@@ -276,6 +321,103 @@ export function createRelay(options = {}) {
     try {
       if (pathname === '/health' && req.method === 'GET') {
         json(res, 200, { ok: true, service: 'eo-relay', instanceId, time: nowMs() })
+        return
+      }
+
+      const profileGetMatch = pathname.match(/^\/v1\/profile\/([A-Za-z0-9_-]{8,64})$/)
+      if (profileGetMatch && req.method === 'GET') {
+        if (!limiter.hit(`profile-get:${clientIp(req, config.trustProxy)}`, 120, 60_000)) {
+          json(res, 429, { error: 'too many requests' })
+          return
+        }
+        const profile = db.getProfile(profileGetMatch[1])
+        if (!profile) { json(res, 404, { error: 'profile not found' }); return }
+        json(res, 200, {
+          deviceId: profile.device_id,
+          name: profile.name,
+          iconType: profile.icon_type || '',
+          iconBase64: profile.icon ? Buffer.from(profile.icon).toString('base64') : '',
+          updatedAt: profile.updated_at,
+        })
+        return
+      }
+
+      if (pathname === '/v1/profile' && req.method === 'POST') {
+        const ip = clientIp(req, config.trustProxy)
+        if (!limiter.hit(`profile-put:${ip}`, 30, 60_000)) { json(res, 429, { error: 'too many requests' }); return }
+        const raw = await readBody(req, config.maxBodyBytes)
+        const auth = authenticateRest(req, raw, pathname)
+        if (!auth.ok) { json(res, auth.status, { error: auth.error }); return }
+        upsertAuthenticatedDevice(auth)
+        let body
+        try { body = JSON.parse(raw || '{}') } catch { json(res, 400, { error: 'invalid JSON' }); return }
+        const name = String(body.name || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 32)
+        if (!name) { json(res, 400, { error: 'name is required' }); return }
+        let icon = null
+        let iconType = null
+        if (body.iconBase64) {
+          icon = Buffer.from(String(body.iconBase64), 'base64')
+          if (!icon.length || icon.length > 512 * 1024) { json(res, 400, { error: 'icon must be 1..512KB' }); return }
+          const isPng = icon.length > 8 && icon.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))
+          const isJpeg = icon.length > 3 && icon[0] === 0xff && icon[1] === 0xd8 && icon[2] === 0xff
+          if (!isPng && !isJpeg) { json(res, 400, { error: 'icon must be PNG/JPEG' }); return }
+          iconType = isPng ? 'image/png' : 'image/jpeg'
+        }
+        db.putProfile({ deviceId: auth.deviceId, name, iconType, icon })
+        broadcastProfile(auth.deviceId)
+        const saved = db.getProfile(auth.deviceId)
+        json(res, 200, { ok: true, name, iconType: saved.icon_type || '', updatedAt: saved.updated_at })
+        return
+      }
+
+      const blobMatch = pathname.match(/^\/v1\/blob\/([A-Za-z0-9_-]{10,64})$/)
+      if (blobMatch && (req.method === 'PUT' || req.method === 'GET')) {
+        const ip = clientIp(req, config.trustProxy)
+        if (!limiter.hit(`blob:${ip}`, 60, 60_000)) { json(res, 429, { error: 'too many blob requests' }); return }
+        const blobId = blobMatch[1]
+        const convId = url.searchParams.get('convId') || ''
+        if (!isConvId(convId)) { json(res, 400, { error: 'invalid convId' }); return }
+
+        if (req.method === 'PUT') {
+          const raw = await readBodyBuffer(req, config.maxBlobBytes)
+          const auth = authenticateRest(req, raw, pathname)
+          if (!auth.ok) { json(res, auth.status, { error: auth.error }); return }
+          upsertAuthenticatedDevice(auth)
+          const conv = db.getConversation(convId)
+          if (!conv) { json(res, 404, { error: 'conversation not found' }); return }
+          if (!db.peerOf(conv, auth.deviceId)) { json(res, 403, { error: 'not a conversation member' }); return }
+          if (!raw.length) { json(res, 400, { error: 'empty blob' }); return }
+          if (db.countBlobs(convId) >= 200) { json(res, 429, { error: 'conversation blob quota exceeded' }); return }
+          const digest = crypto.createHash('sha256').update(raw).digest('hex')
+          const result = db.putBlob({ blobId, convId, sender: auth.deviceId, size: raw.length, sha256: digest })
+          if (!result.duplicate) {
+            const file = blobFile(blobId)
+            const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+            fs.writeFileSync(tmp, raw, { mode: 0o600 })
+            fs.renameSync(tmp, file)
+          }
+          json(res, 200, { ok: true, blobId, size: raw.length, sha256: digest, duplicate: result.duplicate })
+          return
+        }
+
+        const auth = authenticateRest(req, '', pathname)
+        if (!auth.ok) { json(res, auth.status, { error: auth.error }); return }
+        upsertAuthenticatedDevice(auth)
+        const blob = db.getBlob(blobId)
+        if (!blob || blob.conv_id !== convId) { json(res, 404, { error: 'blob not found' }); return }
+        const conv = db.getConversation(convId)
+        if (!conv || !db.peerOf(conv, auth.deviceId)) { json(res, 404, { error: 'conversation not found' }); return }
+        const file = blobFile(blobId)
+        if (!fs.existsSync(file)) { json(res, 404, { error: 'blob file missing' }); return }
+        const bytes = fs.readFileSync(file)
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': bytes.length,
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+          'content-security-policy': "default-src 'none'; sandbox",
+        })
+        res.end(bytes)
         return
       }
 

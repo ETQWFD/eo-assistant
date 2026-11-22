@@ -8,7 +8,7 @@
     <title>EO助手</title>
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="icon.svg" />
-    <link rel="stylesheet" href="style.css?v=0.1.0" />
+    <link rel="stylesheet" href="style.css?v=0.2.0" />
   </head>
   <body>
     <header class="topbar">
@@ -44,10 +44,12 @@
         <div id="messages" class="messages"></div>
         <div class="composer">
           <button id="attachBtn" class="attachbtn" aria-label="发送文件">＋</button>
+          <input id="fileInput" type="file" hidden />
           <input id="textInput" autocomplete="off" enterkeyhint="send" placeholder="发消息…" />
+          <button id="voiceBtn" class="voicebtn" aria-label="录制语音">语音</button>
           <button id="sendBtn" class="sendbtn" aria-label="发送">发送</button>
         </div>
-        <div class="stagehint" id="stageHint">阶段 1 支持文本消息；文件、语音、PPT 在阶段 2 接入。</div>
+        <div class="stagehint" id="stageHint">文本、文件、语音与 PPT 均走端到端加密；附件限 16MB。</div>
       </section>
     </main>
 
@@ -112,7 +114,7 @@
           <div><span>连接状态</span><span id="linkState">未连接</span></div>
         </div>
         <div class="notice">
-          设备私钥只保存在本机：Android 使用 Keystore 加密，浏览器使用 localStorage。relay 只转发 AES-GCM 密文，看不到消息内容。
+          设备私钥只保存在本机：Android 使用 Keystore 加密，浏览器使用 localStorage。relay 只转发 AES-GCM 密文，看不到消息内容。桌面端修改名称/头像后会同步到这里。
         </div>
         <button id="resetBtn" class="dangerbtn wide">清除本机身份与全部对话</button>
       </div>
@@ -127,6 +129,6 @@
       </div>
     </template>
 
-    <script type="module" src="app.js?v=0.1.0"></script>
+    <script type="module" src="app.js?v=0.2.0"></script>
   </body>
 </html>

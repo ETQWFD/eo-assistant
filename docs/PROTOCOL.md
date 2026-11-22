@@ -26,7 +26,7 @@
   "convId": "c_...",
   "msgId": "m_...",
   "seq": 1,
-  "kind": "text | file | voice | ppt",
+  "kind": "text | image | file | voice | ppt",
   "sender": "eo1_...",
   "ts": 1720000000000,
   "nonce": "base64url",
@@ -52,7 +52,7 @@ JSON.stringify([v, convId, msgId, seq, kind, sender, ts, nonce, ct, meta ?? null
 2. `blobAad = eo|blob|v1|<convId>|<blobId>|<sender>|<ts>|<sha256>`。
 3. 用会话密钥 AES-256-GCM 加密文件字节，`nonce` 放进信封 `meta`。
 4. `PUT /v1/blob/:blobId?convId=...`，body 是原始密文；签名串覆盖 `sha256hex(密文)`。
-5. 发送 `kind=file|voice|ppt` 的信信封，`meta` 含 `{type,name,mime,size,sha256,blobId,blobNonce,blobAad,duration}`。
+5. 发送 `kind=image|file|voice|ppt` 的信信封，`meta` 含 `{type,name,mime,size,sha256,blobId,blobNonce,blobAad,duration}`。
 6. 桌面收到后 `GET /v1/blob/:blobId?convId=...`，解密、校验 SHA-256，保存到 `eo/<convId>/attachments/<msgId>-<name>`。
 7. 手机点“打开/播放”时才下载并解密，避免自动拉取大文件；Android 通过 `EoNative.saveFile` 写入 `Download/EO助手/`。
 
@@ -70,7 +70,7 @@ JSON.stringify([v, convId, msgId, seq, kind, sender, ts, nonce, ct, meta ?? null
 - 每个 `convId` 对应一个 DSH Session `eo-<convId>`。
 - 首次消息：`agents.create({sessionId, meta:{cwd}, agentOptions})`；已存在：`agents.resume`。
 - 手机消息通过 `Agent.followup({content})` 注入；助手 `assistant/message` 事件被监听并回传手机。
-- 手机附件落盘后，注入的文本包含本地相对路径，Agent 可直接用文件工具读取。
+- 手机图片落盘后，插件读取字节并调用 `attachments.admitPromptContent`，把 DSH 返回的 `image` 块与说明文本一起 `followup`；模型看到的是真实图片附件，不是路径字符串。文本类模型会收到明确的“未作为视觉输入”说明。
 - `eo/` 目录布局：
 
 ```

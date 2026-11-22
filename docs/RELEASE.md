@@ -2,7 +2,7 @@
 
 ## Android APK
 
-本仓库的 APK 是 WebView 壳，不含服务端和插件代码；APK 只加载用户填写的 relay `/app/`。
+本仓库的 APK 是 WebView 壳，内置扫码页和完整 PWA；首启扫码后加载 APK 内的 `assets/app/`，不要求用户填写 relay。
 
 ```bash
 cd apps/android
@@ -18,7 +18,7 @@ export EO_KEYSTORE=/secure/path/eo-release.jks
 export EO_KEYSTORE_PASS='<strong-password>'
 export EO_KEY_ALIAS=eo
 ./build-apk.sh
-apksigner verify --min-sdk-version 24 --print-certs releases/eo-assistant-0.2.0.apk
+apksigner verify --min-sdk-version 24 --print-certs releases/eo-assistant-0.3.0.apk
 ```
 
 密钥托管：离线加密备份，不要提交到公开仓库；CI 中放 secrets，构建后删除临时文件。丢失 keystore 等于放弃应用升级能力。
@@ -31,24 +31,24 @@ DSH 插件是运行在 DeepSeek Harness profile 中的 Cordis 插件，不是独
 - 插件代码是 ESM + 已构建的 `lib/client.js`，没有原生二进制，因此不存在 Windows Authenticode / macOS codesign+notarize 的签名对象；
 - 若未来要做独立托盘客户端，需要单独引入 Electron/Tauri 工程、分别做 Authenticode 与 Apple Developer ID 公证，不能把本插件冒充成已签名的桌面程序。
 
-当前发布物因此是：插件 npm/GitHub 包 + relay 源码包 + Android APK。relay 部署在用户自己的 Linux 服务器，由 Caddy/Nginx 提供 TLS。
+当前发布物：插件 GitHub 包 + Android APK。插件默认自带内置 relay，不需要单独部署；外部 relay 仍可选。
 
 ## GitHub Release
 
 ```bash
 gh release create v0.2.0 \
-  apps/android/releases/eo-assistant-0.2.0.apk \
+  apps/android/releases/eo-assistant-0.3.0.apk \
   --repo ETQWFD/eo-assistant \
-  --title "EO助手 0.2.0" \
-  --notes "阶段 2/3：E2EE 文件/语音/PPT、附件落盘、名称/头像同步、Android APK。"
+  --title "EO助手 0.3.0" \
+  --notes "0.3.0：零输入扫码、内置 relay、Android 内置 PWA、图片视觉输入。"
 ```
 
 插件仓库单独打 tag：
 
 ```bash
 cd eo-dsh-plugin
-git tag v0.2.0 && git push origin v0.2.0
-gh release create v0.2.0 --repo ETQWFD/eo-dsh-plugin --title "dsh-eo-assistant 0.2.0" --notes "..." 
+git tag v0.3.0 && git push origin v0.3.0
+gh release create v0.3.0 --repo ETQWFD/eo-dsh-plugin --title "dsh-eo-assistant 0.3.0" --notes "..." 
 ```
 
 ## 升级顺序

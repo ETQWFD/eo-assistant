@@ -45,15 +45,25 @@
         <div class="composer">
           <button id="attachBtn" class="attachbtn" aria-label="发送文件">＋</button>
           <input id="fileInput" type="file" hidden />
+          <button id="imageBtn" class="attachbtn imagebtn" aria-label="发送图片">图</button>
+          <input id="imageInput" type="file" accept="image/*" hidden />
           <input id="textInput" autocomplete="off" enterkeyhint="send" placeholder="发消息…" />
           <button id="voiceBtn" class="voicebtn" aria-label="录制语音">语音</button>
           <button id="sendBtn" class="sendbtn" aria-label="发送">发送</button>
         </div>
-        <div class="stagehint" id="stageHint">文本、文件、语音与 PPT 均走端到端加密；附件限 16MB。</div>
+        <div class="stagehint" id="stageHint">文本、图片、文件、语音与 PPT 均走端到端加密；图片会被压缩后作为视觉输入，附件限 16MB。</div>
       </section>
     </main>
 
     <div id="toast" class="toast" hidden></div>
+
+    <div id="imageViewer" class="imageviewer" hidden>
+      <div class="imageviewerbar">
+        <span id="imageViewerName">图片</span>
+        <button id="imageViewerClose" class="iconbtn" aria-label="关闭">关闭</button>
+      </div>
+      <img id="imageViewerImg" alt="图片预览" />
+    </div>
 
     <div id="scanModal" class="modal" hidden>
       <div class="sheet">
@@ -97,24 +107,18 @@
         <div class="sheethead">
           <div>
             <div class="sheettitle">设置</div>
-            <div class="sheetdesc">匿名设备身份与 relay 连接</div>
+            <div class="sheetdesc">匿名设备身份与加密连接；无需填写 relay 地址</div>
           </div>
           <button id="settingsClose" class="iconbtn" aria-label="关闭">关闭</button>
         </div>
-        <label class="field">
-          <span>Relay 地址</span>
-          <input id="relayInput" placeholder="https://eo.example.com" />
-        </label>
-        <div class="row">
-          <button id="relaySave" class="primarybtn">保存并连接</button>
-          <button id="openBindHelp" class="ghostbtn">扫码绑定新电脑</button>
-        </div>
         <div class="kv">
+          <div><span>Relay</span><code id="relayValue">自动</code></div>
           <div><span>设备 ID</span><code id="deviceId">—</code></div>
           <div><span>连接状态</span><span id="linkState">未连接</span></div>
         </div>
+        <button id="openBindHelp" class="primarybtn wide">扫码添加一台电脑</button>
         <div class="notice">
-          设备私钥只保存在本机：Android 使用 Keystore 加密，浏览器使用 localStorage。relay 只转发 AES-GCM 密文，看不到消息内容。桌面端修改名称/头像后会同步到这里。
+          设备私钥只保存在本机：Android 使用 Keystore 加密，浏览器使用 localStorage。relay 只转发 AES-GCM 密文，看不到消息内容；图片会作为视觉输入送入电脑上的 DSH 模型。
         </div>
         <button id="resetBtn" class="dangerbtn wide">清除本机身份与全部对话</button>
       </div>

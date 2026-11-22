@@ -1,0 +1,18 @@
+import { chromium } from 'playwright-core'
+const token=process.env.TOKEN
+const b=await chromium.launch({executablePath:'/home/user/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome',headless:true,args:['--no-sandbox']})
+const p=await b.newPage({viewport:{width:1280,height:900}})
+await p.goto(`http://127.0.0.1:8790/?token=${token}`,{waitUntil:'domcontentloaded'})
+await p.waitForTimeout(2000)
+console.log('INIT', (await p.locator('body').innerText()).slice(0,800))
+const cont=p.getByRole('button',{name:/Continue/i}); console.log('CONT',await cont.count()); if(await cont.count()) await cont.first().click()
+await p.waitForTimeout(500); await p.keyboard.press('Escape')
+console.log('MORE',await p.getByText('More',{exact:true}).count())
+await p.getByText('More',{exact:true}).last().click(); await p.waitForTimeout(400)
+console.log('SETTINGS',await p.getByText('Settings',{exact:true}).count())
+await p.getByText('Settings',{exact:true}).click(); await p.waitForTimeout(800)
+console.log('EO',await p.getByText('EO助手连接',{exact:true}).count())
+await p.getByText('EO助手连接',{exact:true}).click(); await p.waitForTimeout(800)
+console.log('BTNS', await p.getByRole('button').allInnerTexts())
+await p.screenshot({path:'/tmp/dsh-debug.png'})
+await b.close()

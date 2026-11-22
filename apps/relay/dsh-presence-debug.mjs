@@ -1,0 +1,28 @@
+import { chromium } from 'playwright-core'
+const token=process.env.TOKEN
+const b=await chromium.launch({executablePath:'/home/user/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome',headless:true,args:['--no-sandbox']})
+const d=await b.newPage({viewport:{width:1280,height:900}})
+const m=await b.newPage({viewport:{width:390,height:844},isMobile:true,hasTouch:true})
+m.on('console', x=>console.log('PWA_CONSOLE',x.type(),x.text()))
+m.on('websocket', ws=>{
+  console.log('WS_OPEN',ws.url())
+  ws.on('framesent', e=>console.log('WS_SENT',String(e.payload).slice(0,160)))
+  ws.on('framereceived', e=>console.log('WS_RECV',String(e.payload).slice(0,160)))
+  ws.on('close', ()=>console.log('WS_CLOSE',ws.url()))
+})
+await d.goto(`http://127.0.0.1:8790/?token=${token}`,{waitUntil:'domcontentloaded'}); await d.waitForTimeout(2200)
+await d.keyboard.press('Escape')
+await d.waitForTimeout(500)
+await d.getByText('More',{exact:true}).last().click(); await d.waitForTimeout(400); await d.getByText('Settings',{exact:true}).click(); await d.waitForTimeout(700); await d.getByText('EO助手连接',{exact:true}).click(); await d.waitForTimeout(500)
+await d.getByRole('button',{name:/生成二维码|刷新二维码|再绑定一台手机/}).first().click(); await d.waitForTimeout(500)
+const src=await d.locator('img[alt="EO助手绑定二维码"]').getAttribute('src')
+await d.addScriptTag({path:'/home/user/Doubao/chats/38455714111537410/eo-assistant/apps/android/assets/setup/jsQR.js'})
+const payload=await d.evaluate(async src=>{const img=new Image();img.src=src;await img.decode();const c=document.createElement('canvas');c.width=img.naturalWidth;c.height=img.naturalHeight;const x=c.getContext('2d');x.drawImage(img,0,0);const z=x.getImageData(0,0,c.width,c.height);return window.jsQR(z.data,z.width,z.height)?.data||''},src)
+console.log('PAYLOAD',payload)
+await m.goto(`http://127.0.0.1:8787/app/#bind=${Buffer.from(payload).toString('base64url')}`,{waitUntil:'domcontentloaded'}); await m.waitForTimeout(1500)
+let code=''; for(let i=0;i<12;i++){await d.waitForTimeout(700); const t=await d.locator('body').innerText(); const mm=t.match(/(?:绑定码|确认码|code)[^\d]{0,12}(\d{6})/i); if(mm){code=mm[1];break}}
+console.log('CODE',code)
+await m.locator('#codeInput').fill(code); await m.locator('#codeBtn').click(); await m.waitForTimeout(3500)
+console.log('BODY',(await m.locator('body').innerText()).slice(0,1000))
+console.log('STORE',await m.evaluate(()=>{const k=Object.keys(localStorage).find(x=>x.includes('eo')); return {keys:Object.keys(localStorage), value:k?localStorage.getItem(k)?.slice(0,800):null}}))
+await b.close()

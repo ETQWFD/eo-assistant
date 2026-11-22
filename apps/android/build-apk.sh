@@ -53,6 +53,9 @@ echo "[4/7] dex"
 cp build/dex/classes.dex build/classes.dex
 (cd build && zip -q base.apk classes.dex)
 
+echo "[4b/7] bundle setup assets"
+if [ -d assets ]; then (cd . && zip -qr build/base.apk assets -x "*.DS_Store"); fi
+
 echo "[5/7] align"
 "$BUILD_TOOLS/zipalign" -f 4 build/base.apk build/aligned.apk
 

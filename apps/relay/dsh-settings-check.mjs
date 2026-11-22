@@ -1,0 +1,27 @@
+import { chromium } from 'playwright-core'
+const token = process.env.TOKEN || '86XQPmyjmw7zi8xnZfoIhBIkSW1Lxe37WKYxs0J2v68'
+const browser = await chromium.launch({ executablePath: '/home/user/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome', headless: true, args: ['--no-sandbox'] })
+const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+page.on('console', m => { if (m.type() === 'error') console.log('ERR', m.text()) })
+await page.goto(`http://127.0.0.1:8790/?token=${token}`, { waitUntil: 'domcontentloaded', timeout: 60000 })
+await page.waitForTimeout(2200)
+const cont = page.getByRole('button', { name: /Continue/i })
+if (await cont.count()) await cont.first().click()
+await page.waitForTimeout(700)
+await page.keyboard.press('Escape')
+await page.getByText('More', { exact: true }).last().click()
+await page.waitForTimeout(500)
+await page.getByText('Settings', { exact: true }).click()
+await page.waitForTimeout(1000)
+await page.getByText('EO助手连接', { exact: true }).click()
+await page.waitForTimeout(900)
+console.log('TEXT', (await page.locator('body').innerText()).slice(0, 1800))
+const qr = page.getByRole('button', { name: /生成二维码/ })
+if (await qr.count()) {
+  await qr.first().click()
+  await page.waitForTimeout(1600)
+}
+console.log('AFTER', (await page.locator('body').innerText()).slice(0, 1800))
+console.log('QRIMG', await page.locator('img[alt="EO助手绑定二维码"]').count())
+await page.screenshot({ path: '/tmp/dsh-eo-settings.png', fullPage: false })
+await browser.close()

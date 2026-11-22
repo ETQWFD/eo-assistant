@@ -552,6 +552,11 @@ export function createRelay(options = {}) {
           seq: 0,
           ts: nowMs(),
         })
+        // Both sockets are already open when a conversation is created, so
+        // announcePresence() never fires for it. Send the online state now;
+        // otherwise the two clients keep showing “offline” after a fresh bind.
+        sendPeerPresenceToSelf(conv.phone_device_id)
+        sendPeerPresenceToSelf(conv.desktop_device_id)
         json(res, 200, {
           ok: true,
           bindId: bind.bind_id,

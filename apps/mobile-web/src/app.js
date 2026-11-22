@@ -109,6 +109,7 @@ function kindLabel(message) {
   const type = message.meta?.type || message.kind
   if (type === 'voice') return '语音'
   if (type === 'ppt') return 'PPT'
+  if (type === 'image') return '图片'
   if (type === 'file') return '文件'
   return '消息'
 }
@@ -419,7 +420,11 @@ async function beginBind(payload) {
     key: b64u(key),
     seq: Number(result.seq || 0),
     relay,
-    online: false,
+    // A confirmation can only succeed while the desktop socket is live, and
+    // the relay may have emitted its presence frame before this client had a
+    // conversation object to match it against. Start online and let later
+    // presence frames correct it.
+    online: true,
     unread: 0,
     createdAt: Date.now(),
     lastMessageAt: null,
@@ -611,6 +616,8 @@ async function openAttachment(conv, message, button, audio) {
         audio.hidden = false
         button.hidden = true
         audio.play().catch(() => toast('点击播放器开始播放'))
+      } else if (message.meta?.type === 'image' || message.kind === 'image') {
+        openImageViewer(message._objectUrl, message.meta?.name || '图片')
       } else {
         triggerDownload(message._objectUrl, message.meta?.name || 'attachment')
       }
@@ -624,6 +631,9 @@ async function openAttachment(conv, message, button, audio) {
       audio.hidden = false
       button.hidden = true
       audio.play().catch(() => toast('点击播放器开始播放'))
+    } else if (message.meta?.type === 'image' || message.kind === 'image') {
+      openImageViewer(message._objectUrl, message.meta?.name || '图片')
+      button.textContent = '查看'
     } else if (window.EoNative?.saveFile) {
       const name = message.meta?.name || 'attachment'
       window.EoNative.saveFile(name, message.meta?.mime || 'application/octet-stream', base64ForNative(plain))
@@ -657,8 +667,14 @@ function renderAttachmentCard(conv, message) {
   card.className = 'attachcard'
   const type = meta.type || message.kind
   const icon = document.createElement('div')
-  icon.className = `attachicon${type === 'voice' ? ' voice' : ''}`
-  icon.textContent = type === 'voice' ? '声' : type === 'ppt' ? 'P' : '文'
+  icon.className = `attachicon${type === 'voice' ? ' voice' : ''}${type === 'image' ? ' image' : ''}`
+  icon.textContent = type === 'voice' ? '声' : type === 'ppt' ? 'P' : type === 'image' ? '图' : '文'
+  if (type === 'image' && message._objectUrl) {
+    icon.textContent = ''
+    icon.style.backgroundImage = `url("${message._objectUrl}")`
+    icon.style.backgroundSize = 'cover'
+    icon.style.backgroundPosition = 'center'
+  }
   const info = document.createElement('div')
   info.className = 'attachinfo'
   const name = document.createElement('div')
@@ -676,7 +692,7 @@ function renderAttachmentCard(conv, message) {
   const button = document.createElement('button')
   button.className = 'attachopen'
   button.type = 'button'
-  button.textContent = type === 'voice' ? '播放' : '打开'
+  button.textContent = type === 'voice' ? '播放' : type === 'image' ? '查看' : '打开'
   const audio = document.createElement('audio')
   audio.controls = true
   audio.preload = 'none'
@@ -754,9 +770,9 @@ function closeChat() {
 
 function renderSettings() {
   $('deviceId').textContent = state.identity?.deviceId || '—'
-  $('relayInput').value = state.relay || ''
+  $('relayValue').textContent = state.relay ? state.relay.replace(/^https?:\/\//, '') : '扫码后自动设置'
   const connected = [...links.values()].some(link => link.connected)
-  $('linkState').textContent = connected ? '已连接 relay' : (state.relay ? '连接中 / 未连接' : '未配置')
+  $('linkState').textContent = connected ? '已连接' : (state.relay ? '连接中 / 未连接' : '未连接')
 }
 
 /* ------------------------------------------------------------------- send */
@@ -850,6 +866,9 @@ async function sendAttachment(blob, kind = 'file', duration = 0) {
     meta,
     status: 'uploading',
   }
+  // Show the image immediately from the local bytes; the same bytes are then
+  // encrypted and uploaded, so the preview never depends on a relay round trip.
+  if (kind === 'image') message._objectUrl = URL.createObjectURL(blob)
   if (!Array.isArray(conv.messages)) conv.messages = []
   conv.messages.push(message)
   conv.lastMessageAt = ts
@@ -898,8 +917,76 @@ async function sendAttachment(blob, kind = 'file', duration = 0) {
   renderList()
 }
 
+async function loadBitmap(file) {
+  try {
+    return await createImageBitmap(file, { imageOrientation: 'from-image' })
+  } catch {
+    const url = URL.createObjectURL(file)
+    try {
+      const image = new Image()
+      image.decoding = 'async'
+      image.src = url
+      await image.decode()
+      return image
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    }
+  }
+}
+
+/**
+ * Phone cameras produce 8-20MB originals and sometimes HEIC. Resize to a
+ * model-friendly JPEG before encryption so the relay/blob path and DSH image
+ * admission stay small; PNG/GIF keep their format when already small.
+ */
+async function prepareImage(file) {
+  if (!file?.type?.startsWith('image/')) throw new Error('不是图片文件')
+  const source = await loadBitmap(file)
+  const width = source.width || source.naturalWidth
+  const height = source.height || source.naturalHeight
+  if (!width || !height) throw new Error('无法读取图片尺寸，请换一张 JPEG/PNG')
+  const maxSide = 1600
+  const scale = Math.min(1, maxSide / Math.max(width, height))
+  if (scale === 1 && file.size <= 4 * 1024 * 1024 && ['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(file.type)) {
+    source.close?.()
+    return file
+  }
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(width * scale))
+  canvas.height = Math.max(1, Math.round(height * scale))
+  const context = canvas.getContext('2d')
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, canvas.width, canvas.height)
+  context.drawImage(source, 0, 0, canvas.width, canvas.height)
+  source.close?.()
+  const base = (file.name || 'image').replace(/\.[^.]+$/, '') || 'image'
+  let quality = 0.86
+  let blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality))
+  while (blob && blob.size > 4 * 1024 * 1024 && quality > 0.55) {
+    quality -= 0.1
+    blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality))
+  }
+  if (!blob || blob.size <= 0) throw new Error('图片压缩失败')
+  return new File([blob], `${base}.jpg`, { type: 'image/jpeg', lastModified: Date.now() })
+}
+
+async function sendSelectedImage(file) {
+  if (!file) return
+  toast('正在压缩图片…')
+  try {
+    const prepared = await prepareImage(file)
+    await sendAttachment(prepared, 'image')
+  } catch (error) {
+    toast(`图片处理失败：${error.message || error}`)
+  }
+}
+
 function sendSelectedFile(file) {
   if (!file) return
+  if (String(file.type || '').startsWith('image/')) {
+    sendSelectedImage(file)
+    return
+  }
   const kind = /\.(pptx?)$/i.test(file.name || '') ? 'ppt' : 'file'
   sendAttachment(file, kind)
 }
@@ -979,17 +1066,15 @@ function openSettings() {
   $('settingsModal').hidden = false
 }
 
-function saveRelay() {
-  try {
-    state.relay = normalizeRelay($('relayInput').value)
-    saveState()
-    ensureLink(state.relay)
-    $('settingsModal').hidden = true
-    toast('relay 地址已保存')
-    render()
-  } catch (error) {
-    toast(error.message)
-  }
+function openImageViewer(url, name) {
+  $('imageViewerImg').src = url
+  $('imageViewerName').textContent = name || '图片'
+  $('imageViewer').hidden = false
+}
+
+function closeImageViewer() {
+  $('imageViewer').hidden = true
+  $('imageViewerImg').removeAttribute('src')
 }
 
 function resetAll() {
@@ -1008,6 +1093,22 @@ function resetAll() {
   location.reload()
 }
 
+async function consumeBindHash() {
+  if (!location.hash.startsWith('#bind=')) return false
+  const encoded = location.hash.slice('#bind='.length)
+  let text = ''
+  try {
+    text = new TextDecoder().decode(fromB64u(encoded))
+  } catch {
+    text = decodeURIComponent(encoded)
+  }
+  try {
+    history.replaceState(null, '', `${location.pathname}${location.search}`)
+  } catch { /* WebView may ignore history for a local origin */ }
+  await handleBindText(text)
+  return true
+}
+
 /* ------------------------------------------------------------------- init */
 
 async function init() {
@@ -1018,6 +1119,11 @@ async function init() {
     state.identity = await createIdentity()
   }
   state.relay = saved?.relay ? String(saved.relay) : ''
+  // When the PWA is served by a relay, that origin is the relay. The bundled
+  // Android setup page uses app.local and must wait for the QR instead.
+  if (!state.relay && /^https?:$/.test(location.protocol) && location.hostname !== 'app.local') {
+    state.relay = location.origin
+  }
   state.conversations = Array.isArray(saved?.conversations) ? saved.conversations : []
   for (const conv of state.conversations) {
     conv.messages = Array.isArray(conv.messages) ? conv.messages : []
@@ -1032,6 +1138,7 @@ async function init() {
   const relays = new Set([state.relay, ...state.conversations.map(conv => conv.relay)].filter(Boolean))
   for (const relay of relays) ensureLink(relay)
   for (const conv of state.conversations) refreshProfile(conv)
+  await consumeBindHash()
 }
 
 /* --------------------------------------------------------------- listeners */
@@ -1062,6 +1169,16 @@ $('fileInput').addEventListener('change', (event) => {
   event.target.value = ''
   sendSelectedFile(file)
 })
+$('imageBtn').addEventListener('click', () => $('imageInput').click())
+$('imageInput').addEventListener('change', (event) => {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  sendSelectedImage(file)
+})
+$('imageViewerClose').addEventListener('click', closeImageViewer)
+$('imageViewer').addEventListener('click', (event) => {
+  if (event.target === $('imageViewer')) closeImageViewer()
+})
 $('voiceBtn').addEventListener('click', toggleRecording)
 $('codeBtn').addEventListener('click', () => {
   const value = $('codeInput').value.trim()
@@ -1078,7 +1195,6 @@ $('codeInput').addEventListener('keydown', (event) => {
 })
 $('settingsBtn').addEventListener('click', openSettings)
 $('settingsClose').addEventListener('click', () => { $('settingsModal').hidden = true })
-$('relaySave').addEventListener('click', saveRelay)
 $('openBindHelp').addEventListener('click', () => {
   $('settingsModal').hidden = true
   openScanner()
